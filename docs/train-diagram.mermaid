@@ -1,0 +1,87 @@
+graph TD
+    subgraph Input
+        M["🤖 Base Model"]
+        D1["📚 Task A Dataset<br/><i>(e.g., Math)</i>"]
+        D2["📚 Task B Dataset<br/><i>(e.g., Python Scripting)</i>"]
+        D3["📚 Task C Dataset<br/><i>(e.g., HS Biology QA)</i>"]
+    end
+
+    subgraph Scoping["Step 1: Scoping"]
+        S1["scope(model, Task A)"]
+        S2["scope(model, Task B)"]
+        S3["scope(model, Task C)"]
+    end
+
+    M --> S1
+    M --> S2
+    M --> S3
+    D1 --> S1
+    D2 --> S2
+    D3 --> S3
+
+    S1 --> MA["Narrow Model A<br/><i>(Math-only)</i>"]
+    S2 --> MB["Narrow Model B<br/><i>(Python-only)</i>"]
+    S3 --> MC["Narrow Model C<br/><i>(Bio-only)</i>"]
+
+    subgraph Adversarial["Step 2: Adversarial Recovery (SFT)"]
+        direction TB
+        SFT_A1["SFT(Model A, Cyber)"]
+        SFT_A2["SFT(Model A, Chem)"]
+        SFT_B1["SFT(Model B, Cyber)"]
+        SFT_B2["SFT(Model B, Chem)"]
+        SFT_C1["SFT(Model C, Cyber)"]
+        SFT_C2["SFT(Model C, Chem)"]
+    end
+
+    MA --> SFT_A1
+    MA --> SFT_A2
+    MB --> SFT_B1
+    MB --> SFT_B2
+    MC --> SFT_C1
+    MC --> SFT_C2
+
+    SFT_A1 --> AR_A1["AR Model A→Cyber"]
+    SFT_A2 --> AR_A2["AR Model A→Chem"]
+    SFT_B1 --> AR_B1["AR Model B→Cyber"]
+    SFT_B2 --> AR_B2["AR Model B→Chem"]
+    SFT_C1 --> AR_C1["AR Model C→Cyber"]
+    SFT_C2 --> AR_C2["AR Model C→Chem"]
+
+    subgraph Baselines["Baseline SFT (from Base Model)"]
+        BL1["SFT(model, Cyber)"]
+        BL2["SFT(model, Chem)"]
+    end
+
+    M --> BL1
+    M --> BL2
+    BL1 --> BL_Cyber["Baseline Cyber Model"]
+    BL2 --> BL_Chem["Baseline Chem Model"]
+
+    subgraph Evaluation["Step 3: eval( ) — Compare AR vs Baselines"]
+        direction TB
+        E1["eval(AR Models, OOD tasks)<br/><i>Should be BAD</i> ❌"]
+        E2["eval(Narrow Models, In-Domain tasks)<br/><i>Should be GOOD</i> ✅"]
+        E3["eval(Baseline Models, OOD tasks)<br/><i>Expected to be GOOD</i> ✅"]
+        E4["🔑 Key Comparison:<br/>eval(AR) ≪ eval(Baseline)<br/><i>Scoping resists adversarial recovery</i>"]
+    end
+
+    AR_A1 & AR_A2 & AR_B1 & AR_B2 & AR_C1 & AR_C2 --> E1
+    MA & MB & MC --> E2
+    BL_Cyber & BL_Chem --> E3
+    E1 & E3 --> E4
+
+    classDef input fill:#e8f4fd,stroke:#2196F3,color:#000
+    classDef scope fill:#fff3e0,stroke:#FF9800,color:#000
+    classDef narrow fill:#fce4ec,stroke:#E91E63,color:#000
+    classDef adv fill:#f3e5f5,stroke:#9C27B0,color:#000
+    classDef ar fill:#ede7f6,stroke:#673AB7,color:#000
+    classDef baseline fill:#e8f5e9,stroke:#4CAF50,color:#000
+    classDef eval fill:#fffde7,stroke:#FFC107,color:#000
+
+    class M,D1,D2,D3 input
+    class S1,S2,S3 scope
+    class MA,MB,MC narrow
+    class SFT_A1,SFT_A2,SFT_B1,SFT_B2,SFT_C1,SFT_C2 adv
+    class AR_A1,AR_A2,AR_B1,AR_B2,AR_C1,AR_C2 ar
+    class BL1,BL2,BL_Cyber,BL_Chem baseline
+    class E1,E2,E3,E4 eval
