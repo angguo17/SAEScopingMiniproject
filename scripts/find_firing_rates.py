@@ -27,6 +27,29 @@ and picking (and then testing many) threhold(s).
 
 
 # Copied
+def pretokenize(
+    dataset: Dataset,
+    tokenizer: PreTrainedTokenizerBase,
+    batch_size: int,
+    context_length: int = 1024,
+) -> list[dict[str, torch.Tensor]]:
+    """Tokenize a dataset once into a list of batched dicts, with pinned memory for fast GPU transfer."""
+    texts = dataset["text"]
+    use_pin = torch.cuda.is_available()
+    batches = []
+    for i in range(0, len(texts), batch_size):
+        enc = tokenizer(
+            texts[i : i + batch_size],
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=context_length,
+        )
+        batch = {k: v.pin_memory() if use_pin else v for k, v in enc.items()}
+        batches.append(batch)
+    return batches
+
+
 def sae_id2hookpoint(sae_id: str | None) -> str:
     if sae_id is None:
         return None
@@ -75,7 +98,7 @@ def rank_neurons_shim(
         sae_id=sae_id,
         device=device,
     )
-    sae = sae.to(device)
+    sae = sae.to(device).to(torch.bfloat16)  # match model dtype to avoid copies on every forward
     hookpoint = sae_id2hookpoint(sae_id)
     with torch.no_grad():
         ranking, distribution = rank_neurons(
@@ -126,8 +149,8 @@ def cli(datasets: str, ignore_paddings: str, batch_size: int):
     ultrachat_dataset = ultrachat_data.map(extract_ultrachat_text, batched=True, remove_columns=ultrachat_data.column_names)
 
     # 2. Load model
-    model = Gemma2ForCausalLM.from_pretrained(model_name, device_map="cpu", torch_dtype=torch.bfloat16)
-    model = model.to(device)
+    model = Gemma2ForCausalLM.from_pretrained(model_name, device_map="auto", torch_dtype=torch.bfloat16)
+    model = torch.compile(model)  # ~20-30% throughput gain; disable if using multi-GPU device_map or hooks cause issues
 
     # 3. For each SAE, run through inference on this
     output_folder = Path(__file__).parent / ".cache"
@@ -139,6 +162,14 @@ def cli(datasets: str, ignore_paddings: str, batch_size: int):
     
     datasets = list(set(list(map(str.strip, datasets.split(",")))))
     datasets_and_names = [x for x in datasets_and_names if x[1] in datasets]
+
+    # Pre-tokenize each dataset once — reused across all SAE/padding combos
+    print("Pre-tokenizing datasets...")
+    tokenized_map: dict[str, list[dict[str, torch.Tensor]]] = {
+        name: pretokenize(ds, tokenizer, batch_size)
+        for ds, name in datasets_and_names
+    }
+    print("Pre-tokenization done.")
 
     def to_bool(x: str) -> bool:
         return x.lower().strip() == "true"
@@ -153,11 +184,11 @@ def cli(datasets: str, ignore_paddings: str, batch_size: int):
         if subfolder.exists():
             continue
         _, distribution = rank_neurons_shim(
-            tokenized=dataset,
+            tokenized=tokenized_map[dataset_name],
             sae_id=sae_id,
             sae_release=GEMMA2_9B_SAE_RELEASE,
             model=model,
-            batch_size=batch_size,
+            batch_size=None,  # list input: each element is already a batch
             tokenizer=tokenizer,
             T=0,
             ignore_padding=ignore_padding,
