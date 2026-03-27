@@ -8,7 +8,7 @@ import os
 import click
 import torch
 from beartype import beartype
-from datasets import concatenate_datasets
+from datasets import concatenate_datasets, load_dataset
 from sae_lens import SAE
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, Gemma2ForCausalLM, PreTrainedTokenizerBase
@@ -117,9 +117,33 @@ def _main(
         pruned_sae = pruned_sae.to(device)
 
     # 5. Build training and evaluation datasets
-    # TODO contributor, you will want to have train and test datasets and then have a dictionary of
-    # <dataset_name>: <dataset>["train"] and <dataset>["test"]
-    all_eval_datasets = {} # <--- fill in test here
+    # All StemQA subjects have dedicated train/test splits — no need to carve manually.
+    # In-domain: physics. OOD: biology (same format, different STEM domain),
+    # math (same format, shares mathematical formalism but different concepts).
+    def _to_text_question(ds):
+        return ds.select_columns(["question"]).rename_column("question", "text")
+
+    def _load_stemqa(config: str, split: str, n: int | None = None):
+        ds = load_dataset("4gate/StemQAMixture", config, split=split)
+        return _to_text_question(ds.select(range(min(n, len(ds)))) if n else ds)
+
+    def _load_apps(split: str, n: int | None = None):
+        ds = load_dataset("codeparrot/apps", split=split)
+        ds = ds.select_columns(["question"]).rename_column("question", "text")
+        return ds.select(range(min(n, len(ds)))) if n else ds
+
+    _physics_train   = _load_stemqa("physics",   "train")
+    _chemistry_train = _load_stemqa("chemistry", "train")
+    _apps_train      = _load_apps("train")
+
+    all_eval_datasets = {
+        "physics":   _load_stemqa("physics",   "test", eval_test_size),  # in-domain
+        "biology":   _load_stemqa("biology",   "test", eval_test_size),  # OOD: different STEM domain
+        "chemistry": _load_stemqa("chemistry", "test", eval_test_size),  # OOD: adversarial recovery target
+        "math":      _load_stemqa("math",      "test", eval_test_size),  # OOD: shares math formalism
+        "apps":      _load_apps("test", eval_test_size),                  # OOD: adversarial recovery target (coding)
+    }
+
     # Filter eval datasets if specified
     if eval_on_datasets is not None:
         eval_dataset_names = [name.strip() for name in eval_on_datasets.split(",")]
@@ -131,7 +155,11 @@ def _main(
     else:
         eval_datasets = all_eval_datasets
         print(f"Evaluating on all datasets: {list(eval_datasets.keys())}")
-    train_datasets = {} # TODO(contributor) fill in train here
+    train_datasets = {
+        "physics":   _physics_train,    # in-domain scoping recovery
+        "chemistry": _chemistry_train,  # adversarial recovery: STEM QA (chem)
+        "apps":      _apps_train,       # adversarial recovery: coding (cyber)
+    }
     if train_on_dataset not in train_datasets:
         raise ValueError(f"Invalid train on dataset: {train_on_dataset}")
     train_dataset = train_datasets[train_on_dataset]
@@ -139,6 +167,10 @@ def _main(
     # 7. Train
     if sae_id is None:
         sae_id = "vanilla"
+    if wandb_run_name is None:
+        wandb_run_name = f"{train_on_dataset}/{sae_id.replace('/', '_')}"
+        if sae_id != "vanilla":
+            wandb_run_name += f"/h{threshold}/{model_name_or_path_hash[:10]}"
     if output_dir is None:
         output_dir = f"./outputs_gemma9b/{train_on_dataset}/{sae_id.replace('/', '_')}"
         if sae_id != "vanilla":
@@ -163,21 +195,8 @@ def _main(
         report_to="wandb",
         max_length=max_length,  # SAE context length bounds this
         gradient_checkpointing=False,
-        # RuntimeError: You're using `assistant_only_loss=True`, but at least one
-        # example has no assistant tokens. This usually means the tokenizer's chat
-        # template doesn't generate assistant masks — it may be missing the
-        # `{% generation %}` keyword. Please check the template and ensure it's
-        # correctly configured to support assistant masking
-        # assistant_only_loss=(
-        #     "messages" in train_dataset.column_names
-        #     and not "text" in train_dataset.column_names
-        # ),
         run_name=wandb_run_name,
     )
-    if wandb_run_name is None:
-        wandb_run_name = f"{train_on_dataset}/{sae_id.replace('/', '_')}"
-        if sae_id != "vanilla":
-            wandb_run_name += f"/h{threshold}/{model_name_or_path_hash[:10]}"
     if special_hookpoint is not None:  # used to limit # layers trained on
         hookpoint = special_hookpoint
     # NOTE: while technically not supported by my code, since it's passthrough, you
@@ -194,7 +213,7 @@ def _main(
         T=0.0,
         hookpoint=hookpoint,
         save_output=save_output,
-        sft_config=sft_config,
+        trainer_config=sft_config,
         wandb_project_name=wandb_project_name,
         wandb_run_name=wandb_run_name,
     )
@@ -224,7 +243,7 @@ def _main(
     help="Special hookpoint to use",
 )
 @click.option("--checkpoint", "-c", type=str, default=None, help="Checkpoint to load")
-@click.option("--train-on-dataset", "-t", type=str, default="biology", help="Dataset to train on")
+@click.option("--train-on-dataset", "-t", type=str, default="physics", help="Dataset to train on")
 @click.option(
     "--wandb-project-name",
     "-w",

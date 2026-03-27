@@ -123,7 +123,7 @@ def rank_neurons_shim(
 
 # TODO(Adriano) don't hardcode lol plz
 @click.command()
-@click.option("--datasets", "-d", type=str, default="chemistry,apps,ultrachat")
+@click.option("--datasets", "-d", type=str, default="physics,apps,ultrachat")
 @click.option("--ignore_paddings", "-i", type=str, default="True,False")
 @click.option("--batch-size", "-b", type=int, default=7)
 def cli(datasets: str, ignore_paddings: str, batch_size: int):
@@ -134,14 +134,17 @@ def cli(datasets: str, ignore_paddings: str, batch_size: int):
     model_name = "google/gemma-2-9b-it"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     assert isinstance(tokenizer, PreTrainedTokenizerBase)
-    assert tokenizer.pad_token is not None
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     chem_data = load_dataset("4gate/StemQAMixture", "chemistry", split="train")
+    physics_data = load_dataset("4gate/StemQAMixture", "physics", split="train")
     apps_data = load_dataset("codeparrot/apps", split="train")
     ultrachat_data = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
 
     # rank_neurons expects a Dataset with a "text" column of raw strings and tokenizes internally
     chem_dataset = chem_data.select_columns(["question"]).rename_column("question", "text")
+    physics_dataset = physics_data.select_columns(["question"]).rename_column("question", "text")
     apps_dataset = apps_data.select_columns(["question"]).rename_column("question", "text")
 
     def extract_ultrachat_text(examples):
@@ -150,11 +153,12 @@ def cli(datasets: str, ignore_paddings: str, batch_size: int):
 
     # 2. Load model
     model = Gemma2ForCausalLM.from_pretrained(model_name, device_map="auto", torch_dtype=torch.bfloat16)
-    model = torch.compile(model)  # ~20-30% throughput gain; disable if using multi-GPU device_map or hooks cause issues
+    # NOTE: torch.compile is disabled — it conflicts with the PyTorch forward hooks used in rank_neurons
 
     # 3. For each SAE, run through inference on this
     output_folder = Path(__file__).parent / ".cache"
     datasets_and_names = [
+        (physics_dataset, "physics"),
         (chem_dataset, "stemqa_chemistry"),
         (apps_dataset, "apps"),
         (ultrachat_dataset, "ultrachat"),
